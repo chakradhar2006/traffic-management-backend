@@ -1,12 +1,14 @@
 import os
+import io
 import cv2
 import time
 import asyncio
 import secrets
+import boto3
+from botocore.client import Config
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Request, Header, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from database import (
     get_recent_rule_breakers, log_vehicle_count, log_rule_breaker,
@@ -67,10 +69,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve violations images as static files so frontend can fetch them
-VIOLATION_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "violations"))
-os.makedirs(VIOLATION_DIR, exist_ok=True)
-app.mount("/violations", StaticFiles(directory=VIOLATION_DIR), name="violations")
+# ── S3 client (violation images) ──────────────────────────────────────────────
+_BUCKET_NAME     = os.environ.get("BUCKET_NAME", "")
+_BUCKET_REGION   = os.environ.get("BUCKET_REGION", "")
+_BUCKET_ENDPOINT = os.environ.get("BUCKET_ENDPOINT", "")
+_BUCKET_ACCESS_KEY = os.environ.get("BUCKET_ACCESS_KEY", "")
+_BUCKET_SECRET_KEY = os.environ.get("BUCKET_SECRET_KEY", "")
+
+def _get_s3():
+    return boto3.client(
+        "s3",
+        region_name=_BUCKET_REGION,
+        endpoint_url=_BUCKET_ENDPOINT,
+        aws_access_key_id=_BUCKET_ACCESS_KEY,
+        aws_secret_access_key=_BUCKET_SECRET_KEY,
+        config=Config(signature_version="s3v4"),
+    )
 
 UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uploads"))
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -150,7 +164,8 @@ def process_lane_video(lane_id, video_path):
 
             
             if violation_img:
-                log_rule_breaker(lane_id, violation_img)
+                filename, image_bytes = violation_img
+                log_rule_breaker(lane_id, filename, image_bytes)
                 
             if emergency:
                 log_emergency(lane_id, "EMERGENCY_VEHICLE")
@@ -275,6 +290,19 @@ async def lane_status():
 @app.get("/rule-breakers")
 async def rule_breakers():
     return get_recent_rule_breakers(20)
+
+
+@app.get("/violations/{filename}")
+async def get_violation_image(filename: str):
+    """Fetch a violation image from S3 and stream it to the client."""
+    s3_key = f"violations/{filename}"
+    try:
+        s3 = _get_s3()
+        obj = s3.get_object(Bucket=_BUCKET_NAME, Key=s3_key)
+        image_bytes = obj["Body"].read()
+        return Response(content=image_bytes, media_type="image/jpeg")
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Violation image not found: {e}")
 
 
 @app.post("/simulate-emergency/{lane_id}")

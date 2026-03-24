@@ -1,7 +1,27 @@
 import sqlite3
 import os
+import io
 import hashlib
+import boto3
+from botocore.client import Config
 from datetime import datetime
+
+# ── S3 client ─────────────────────────────────────────────────────────────────
+BUCKET_NAME     = os.environ.get("BUCKET_NAME", "")
+BUCKET_REGION   = os.environ.get("BUCKET_REGION", "")
+BUCKET_ENDPOINT = os.environ.get("BUCKET_ENDPOINT", "")
+BUCKET_ACCESS_KEY = os.environ.get("BUCKET_ACCESS_KEY", "")
+BUCKET_SECRET_KEY = os.environ.get("BUCKET_SECRET_KEY", "")
+
+def _get_s3_client():
+    return boto3.client(
+        "s3",
+        region_name=BUCKET_REGION,
+        endpoint_url=BUCKET_ENDPOINT,
+        aws_access_key_id=BUCKET_ACCESS_KEY,
+        aws_secret_access_key=BUCKET_SECRET_KEY,
+        config=Config(signature_version="s3v4"),
+    )
 
 # Get the absolute path to the database directory based on the location of this script
 DB_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "database"))
@@ -78,11 +98,25 @@ def log_emergency(lane, vehicle_type):
     conn.commit()
     conn.close()
 
-def log_rule_breaker(lane, image_path):
-    """Log a zebra crossing violation."""
+def log_rule_breaker(lane, filename, image_bytes):
+    """Upload violation image to S3 and log the S3 URL in the database."""
+    s3_key = f"violations/{filename}"
+    s3_url = filename  # fallback: store filename if upload fails
+    try:
+        s3 = _get_s3_client()
+        s3.upload_fileobj(
+            io.BytesIO(image_bytes),
+            BUCKET_NAME,
+            s3_key,
+            ExtraArgs={"ContentType": "image/jpeg"},
+        )
+        s3_url = s3_key
+    except Exception as e:
+        print(f"S3 upload failed for {filename}: {e}")
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO rule_breakers (lane_number, image_path) VALUES (?, ?)", (lane, image_path))
+    cursor.execute("INSERT INTO rule_breakers (lane_number, image_path) VALUES (?, ?)", (lane, s3_url))
     conn.commit()
     conn.close()
 

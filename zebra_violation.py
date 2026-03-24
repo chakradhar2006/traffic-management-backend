@@ -2,19 +2,18 @@ import cv2
 import os
 import time
 
-VIOLATION_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "violations"))
 
 class ZebraCrossingMonitor:
     def __init__(self, line_y_ratio=0.75):
         # 75% down the screen
         self.line_y_ratio = line_y_ratio
-        os.makedirs(VIOLATION_DIR, exist_ok=True)
         # Prevent logging the same vehicle multiple times
         self.last_violation_time = 0 
         
     def check_violation(self, frame, bboxes, signal_state, lane_number):
         """
         Draw ROI line. If vehicle crosses during RED, take a snapshot.
+        Returns a (filename, image_bytes) tuple on violation, or None.
         """
         h, w = frame.shape[:2]
         line_y = int(h * self.line_y_ratio)
@@ -45,8 +44,9 @@ class ZebraCrossingMonitor:
             self.last_violation_time = current_time
             timestamp = int(current_time)
             filename = f"lane_{lane_number}_{timestamp}.jpg"
-            filepath = os.path.join(VIOLATION_DIR, filename)
-            cv2.imwrite(filepath, frame)
-            return filename
+            success, buffer = cv2.imencode(".jpg", frame)
+            if not success:
+                return None
+            return (filename, buffer.tobytes())
             
         return None
